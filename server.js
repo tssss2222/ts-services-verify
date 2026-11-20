@@ -65,6 +65,21 @@ border:1px solid var(--accent);color:var(--accent);transition:.2s}
 @media (prefers-reduced-motion:reduce){*{animation:none!important}.icoon path{stroke-dashoffset:0}}
 `;
 
+const ADMIN_CSS = `
+.admin{max-width:820px;text-align:left}
+.admin .merk{text-align:center}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:18px 0}
+.tegel{padding:16px;border-radius:16px;border:1px solid rgba(0,191,255,.3);background:rgba(0,191,255,.06)}
+.tegel b{display:block;font-size:28px;color:var(--accent);text-shadow:0 0 12px rgba(0,191,255,.5)}
+.tegel span{font-size:12px;color:#8fb0cc;letter-spacing:.05em}
+h2{font-size:13px;letter-spacing:.2em;color:var(--accent);margin:26px 0 10px}
+.rij{display:flex;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid rgba(255,255,255,.07);font-size:14px}
+.rij small{color:#6f8aa3}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{padding:6px 10px;border-radius:999px;font-size:12px;border:1px solid rgba(0,191,255,.35)}
+.chip.uit{border-color:#ff4d6d;color:#ff4d6d}
+`;
+
 function pagina({ icoon = "ok", titel, tekst, gebruiker, knoppen = [], fout = false }) {
   const avatar = gebruiker
     ? `<img class="avatar" alt="" src="${
@@ -158,6 +173,37 @@ async function logVerificatie(user) {
   });
 }
 
+/* ---------- Statistieken voor het dashboard ---------- */
+
+async function registreer(user) {
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) return;
+  try {
+    const dag = new Date().toISOString().slice(0, 10);
+    await redis("INCR", "stat:total");
+    await redis("INCR", `stat:dag:${dag}`);
+    await redis("LPUSH", "recent", JSON.stringify({
+      id: user.id,
+      naam: user.global_name || user.username,
+      tijd: Date.now(),
+    }));
+    await redis("LTRIM", "recent", "0", "19");
+  } catch (e) {
+    console.error("Stats mislukt:", e.message);
+  }
+}
+
+async function guildInfo(id) {
+  if (!id) return null;
+  try {
+    const r = await fetch(`${API}/guilds/${id}?with_counts=true`, {
+      headers: { Authorization: `Bot ${BOT_TOKEN}` },
+    });
+    return r.ok ? await r.json() : null;
+  } catch {
+    return null;
+  }
+}
+
 /* ---------- Leden naar een andere server zetten ---------- */
 
 const wacht = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -193,6 +239,7 @@ async function voegToe(userId, accessToken) {
       await wacht(((d.retry_after || 2) + 0.5) * 1000);
       continue;
     }
+    if (!resp.ok) console.error("Pull antwoord:", resp.status, await resp.text());
     return resp.status;
   }
   return 429;
@@ -274,6 +321,72 @@ app.get("/pull", async (req, res) => {
   }));
 });
 
+/* ---------- Admin-dashboard ---------- */
+
+app.get("/admin", async (req, res) => {
+  if (!ADMIN_KEY || req.query.key !== ADMIN_KEY) {
+    return res.status(403).send(pagina({
+      icoon: "fout", fout: true,
+      titel: "Geen toegang",
+      tekst: "Deze pagina is alleen voor admins.",
+    }));
+  }
+
+  let opgeslagen = "–", vandaag = "–", totaal = "–", recent = [];
+  if (UPSTASH_URL && UPSTASH_TOKEN) {
+    try {
+      const dag = new Date().toISOString().slice(0, 10);
+      opgeslagen = (await redis("KEYS", "tok:*")).length;
+      vandaag = (await redis("GET", `stat:dag:${dag}`)) || 0;
+      totaal = (await redis("GET", "stat:total")) || 0;
+      recent = (await redis("LRANGE", "recent", "0", "9")).map((x) => JSON.parse(x));
+    } catch (e) {
+      console.error("Admin data mislukt:", e.message);
+    }
+  }
+
+  const [hoofd, nieuw] = await Promise.all([guildInfo(GUILD_ID), guildInfo(NEW_GUILD_ID)]);
+  const key = encodeURIComponent(req.query.key);
+
+  const instellingen = {
+    CLIENT_ID, CLIENT_SECRET, BOT_TOKEN, GUILD_ID, REDIRECT_URI, LOG_CHANNEL_ID,
+    UPSTASH_URL, UPSTASH_TOKEN, ADMIN_KEY, NEW_GUILD_ID, NEW_ROLE_ID,
+  };
+  const chips = Object.entries(instellingen)
+    .map(([naam, waarde]) => `<span class="chip${waarde ? "" : " uit"}">${waarde ? "✅" : "❌"} ${naam}</span>`)
+    .join("");
+
+  const tegel = (waarde, label) => `<div class="tegel"><b>${esc(waarde)}</b><span>${esc(label)}</span></div>`;
+  const rijen = recent.length
+    ? recent.map((r) => `<div class="rij"><span>${esc(r.naam)} <small>${esc(r.id)}</small></span><small>${esc(
+        new Date(r.tijd).toLocaleString("nl-NL", { timeZone: "Europe/Amsterdam", dateStyle: "short", timeStyle: "short" })
+      )}</small></div>`).join("")
+    : `<div class="rij"><small>Nog geen verificaties sinds het dashboard actief is.</small></div>`;
+
+  res.send(`<!doctype html><html lang="nl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Dashboard | ${SERVER_NAAM}</title>
+<style>${CSS}${ADMIN_CSS}</style></head>
+<body><div class="snow">${sneeuw}</div>
+<main class="kaart admin"><div class="merk">${SERVER_NAAM} · DASHBOARD</div>
+<div class="grid">
+${tegel(hoofd?.approximate_member_count ?? "–", "Leden hoofdserver")}
+${tegel(nieuw?.approximate_member_count ?? "–", "Leden nieuwe server")}
+${tegel(opgeslagen, "Opgeslagen (pullbaar)")}
+${tegel(vandaag, "Verificaties vandaag")}
+${tegel(totaal, "Verificaties totaal")}
+${tegel(Math.floor(process.uptime() / 60) + " min", "Server actief")}
+</div>
+<h2>LAATSTE VERIFICATIES</h2>${rijen}
+<h2>INSTELLINGEN</h2><div class="chips">${chips}</div>
+<h2>ACTIES</h2>
+<a class="knop hoofd" href="/pull?key=${key}">Pull starten</a>
+<a class="knop" href="/admin?key=${key}">Verversen</a>
+<a class="knop" href="/">Verificatiepagina openen</a>
+<div class="voet">Alleen voor admins · deel deze link nooit</div></main></body></html>`);
+});
+
 /* ---------- Pagina's ---------- */
 
 app.get("/", (_req, res) => {
@@ -343,6 +456,7 @@ app.get("/callback", async (req, res) => {
 
     await bewaarTokens(user.id, tokenData);
     await logVerificatie(user);
+    await registreer(user);
 
     return res.send(pagina({
       icoon: "ok",

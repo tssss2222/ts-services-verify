@@ -1,33 +1,130 @@
 import express from "express";
 
 const app = express();
-
-const CLIENT_ID = process.env.CLIENT_ID;
-const CLIENT_SECRET = process.env.CLIENT_SECRET;
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const GUILD_ID = process.env.GUILD_ID;
-const REDIRECT_URI = process.env.REDIRECT_URI;
+const { CLIENT_ID, CLIENT_SECRET, BOT_TOKEN, GUILD_ID, REDIRECT_URI } = process.env;
 
 const OUDE_ROL = "1573138403610857513";
 const NIEUWE_ROL = "1573104279839838372";
 const API = "https://discord.com/api/v10";
+const SERVER_NAAM = "TS SERVICES";
+
+const authUrl =
+  `https://discord.com/oauth2/authorize?client_id=${CLIENT_ID}` +
+  `&response_type=code&redirect_uri=${encodeURIComponent(REDIRECT_URI)}` +
+  `&scope=identify+email+guilds.join`;
+
+const esc = (s) =>
+  String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+const sneeuw = Array.from({ length: 28 }, () => {
+  const l = (Math.random() * 100).toFixed(1);
+  const d = (8 + Math.random() * 10).toFixed(1);
+  const v = (Math.random() * 10).toFixed(1);
+  const s = (2 + Math.random() * 4).toFixed(1);
+  return `<i style="left:${l}%;width:${s}px;height:${s}px;animation-duration:${d}s;animation-delay:-${v}s"></i>`;
+}).join("");
+
+const ICONEN = {
+  ok: `<svg viewBox="0 0 52 52"><circle cx="26" cy="26" r="23"/><path d="M15 27l8 8 15-17"/></svg>`,
+  fout: `<svg viewBox="0 0 52 52"><circle cx="26" cy="26" r="23"/><path d="M18 18l16 16M34 18L18 34"/></svg>`,
+  schild: `<svg viewBox="0 0 52 52"><path d="M26 5l17 6v13c0 11-7 19-17 23C16 43 9 35 9 24V11z"/><path d="M19 26l5 5 10-11"/></svg>`,
+};
+
+const CSS = `
+*{box-sizing:border-box;margin:0}
+:root{--accent:#00bfff}
+html,body{min-height:100%}
+body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#e8f4ff;
+background:radial-gradient(ellipse at 50% 0%,#0b2a4a 0%,#05080f 65%) fixed;
+display:flex;align-items:center;justify-content:center;padding:20px;min-height:100vh}
+.snow{position:fixed;inset:0;overflow:hidden;pointer-events:none}
+.snow i{position:absolute;top:-10px;background:#fff;border-radius:50%;opacity:.7;animation:val linear infinite}
+@keyframes val{to{transform:translate(30px,105vh)}}
+.kaart{position:relative;width:100%;max-width:440px;text-align:center;padding:38px 26px 30px;
+border-radius:24px;background:rgba(10,20,35,.78);border:1px solid color-mix(in srgb,var(--accent) 40%,transparent);
+box-shadow:0 0 45px color-mix(in srgb,var(--accent) 20%,transparent),inset 0 0 30px rgba(0,191,255,.05);
+backdrop-filter:blur(8px);animation:op .6s ease both}
+@keyframes op{from{opacity:0;transform:translateY(14px) scale(.98)}}
+.merk{font-size:12px;letter-spacing:.35em;color:var(--accent);margin-bottom:22px;font-weight:700;text-shadow:0 0 12px var(--accent)}
+.icoon{width:84px;height:84px;margin:0 auto 18px;filter:drop-shadow(0 0 12px var(--accent))}
+.icoon svg{width:100%;height:100%;fill:none;stroke:var(--accent);stroke-width:2.5;stroke-linecap:round;stroke-linejoin:round}
+.icoon path{stroke-dasharray:80;stroke-dashoffset:80;animation:teken .8s .3s ease forwards}
+@keyframes teken{to{stroke-dashoffset:0}}
+.avatar{width:72px;height:72px;border-radius:50%;border:2px solid var(--accent);box-shadow:0 0 18px var(--accent);margin:0 auto 10px;display:block}
+.naam{font-weight:700;margin-bottom:14px;font-size:17px}
+h1{font-size:clamp(22px,6vw,28px);margin-bottom:10px}
+p{color:#a9c4de;line-height:1.55;font-size:15px;margin-bottom:24px}
+.knop{display:block;padding:14px 18px;border-radius:14px;text-decoration:none;font-weight:700;margin-top:10px;
+border:1px solid var(--accent);color:var(--accent);transition:.2s}
+.knop.hoofd{background:linear-gradient(135deg,#00bfff,#0077ff);color:#021018;border:0;box-shadow:0 0 22px rgba(0,191,255,.45)}
+.knop:hover,.knop:active{transform:translateY(-2px);box-shadow:0 0 26px color-mix(in srgb,var(--accent) 55%,transparent)}
+.voet{margin-top:22px;font-size:11px;color:#5d7893;letter-spacing:.08em}
+@media (prefers-reduced-motion:reduce){*{animation:none!important}.icoon path{stroke-dashoffset:0}}
+`;
+
+function pagina({ icoon = "ok", titel, tekst, gebruiker, knoppen = [], fout = false }) {
+  const avatar = gebruiker
+    ? `<img class="avatar" alt="" src="${
+        gebruiker.avatar
+          ? `https://cdn.discordapp.com/avatars/${esc(gebruiker.id)}/${esc(gebruiker.avatar)}.png?size=128`
+          : "https://cdn.discordapp.com/embed/avatars/0.png"
+      }"><div class="naam">${esc(gebruiker.global_name || gebruiker.username)}</div>`
+    : `<div class="icoon">${ICONEN[icoon]}</div>`;
+  const knopHtml = knoppen
+    .map((k) => `<a class="knop${k.hoofd ? " hoofd" : ""}" href="${esc(k.href)}">${esc(k.tekst)}</a>`)
+    .join("");
+  return `<!doctype html><html lang="nl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${esc(titel)} | ${SERVER_NAAM}</title>
+<style>${CSS}${fout ? ":root{--accent:#ff4d6d}" : ""}</style></head>
+<body><div class="snow">${sneeuw}</div>
+<main class="kaart"><div class="merk">${SERVER_NAAM}</div>${avatar}
+<h1>${esc(titel)}</h1><p>${esc(tekst)}</p>${knopHtml}
+<div class="voet">Beveiligde verificatie via Discord</div></main></body></html>`;
+}
+
+const opnieuw = [{ tekst: "Opnieuw proberen", href: authUrl, hoofd: true }];
+
+async function check(resp, stap) {
+  if (!resp.ok) throw new Error(`${stap} mislukt: ${resp.status}`);
+  return resp;
+}
 
 app.get("/", (_req, res) => {
-  res.send("TS SERVICES verificatie draait.");
+  res.send(pagina({
+    icoon: "schild",
+    titel: "Verificatie",
+    tekst: "Autoriseer de bot met je Discord-account om toegang te krijgen tot de server.",
+    knoppen: [{ tekst: "Verifiëren met Discord", href: authUrl, hoofd: true }],
+  }));
 });
+
+app.get("/ping", (_req, res) => res.send("ok"));
 
 app.get("/callback", async (req, res) => {
   try {
-    const { code } = req.query;
-    if (!code || typeof code !== "string") {
-      return res.status(400).send("Verificatiecode ontbreekt.");
+    if (req.query.error) {
+      return res.status(200).send(pagina({
+        icoon: "fout", fout: true,
+        titel: "Geannuleerd",
+        tekst: "Je hebt de verificatie geannuleerd. Probeer het opnieuw als je toegang wilt.",
+        knoppen: opnieuw,
+      }));
     }
 
-    const tokenResponse = await fetch(`${API}/oauth2/token`, {
+    const { code } = req.query;
+    if (!code || typeof code !== "string") {
+      return res.status(400).send(pagina({
+        icoon: "fout", fout: true,
+        titel: "Geen code",
+        tekst: "Open de verificatieknop in Discord om te beginnen.",
+        knoppen: opnieuw,
+      }));
+    }
+
+    const tokenResp = await fetch(`${API}/oauth2/token`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
         client_id: CLIENT_ID,
         client_secret: CLIENT_SECRET,
@@ -36,59 +133,42 @@ app.get("/callback", async (req, res) => {
         redirect_uri: REDIRECT_URI,
       }),
     });
-    const tokenData = await tokenResponse.json();
-    console.error("Token fout:", tokenData);
-    if (!tokenData.access_token) {
-      return res.status(400).send("Verificatie mislukt.");
-    }
+    await check(tokenResp, "Token ophalen");
+    const { access_token } = await tokenResp.json();
 
-    const userResponse = await fetch(`${API}/users/@me`, {
-      headers: {
-        Authorization: `Bearer ${tokenData.access_token}`,
-      },
-    });
-    if (!userResponse.ok) {
-      throw new Error(`Gebruiker ophalen mislukt: ${userResponse.status}`);
-    }
-    const userData = await userResponse.json();
+    const userResp = await check(
+      await fetch(`${API}/users/@me`, { headers: { Authorization: `Bearer ${access_token}` } }),
+      "Gebruiker ophalen"
+    );
+    const user = await userResp.json();
 
-    const memberUrl = `${API}/guilds/${GUILD_ID}/members/${userData.id}`;
-    const botHeaders = {
-      Authorization: `Bot ${BOT_TOKEN}`,
-    };
+    const memberUrl = `${API}/guilds/${GUILD_ID}/members/${user.id}`;
+    const botHeaders = { Authorization: `Bot ${BOT_TOKEN}` };
 
-    const joinResponse = await fetch(memberUrl, {
+    await check(await fetch(memberUrl, {
       method: "PUT",
-      headers: {
-        ...botHeaders,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ access_token: tokenData.access_token }),
-    });
-    if (!joinResponse.ok) {
-      throw new Error(`Gebruiker toevoegen mislukt: ${joinResponse.status}`);
-    }
+      headers: { ...botHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({ access_token }),
+    }), "Gebruiker toevoegen");
 
-    const addRoleResponse = await fetch(
-      `${memberUrl}/roles/${NIEUWE_ROL}`,
-      { method: "PUT", headers: botHeaders },
-    );
-    if (!addRoleResponse.ok) {
-      throw new Error(`Nieuwe rol toekennen mislukt: ${addRoleResponse.status}`);
-    }
+    await check(await fetch(`${memberUrl}/roles/${NIEUWE_ROL}`, { method: "PUT", headers: botHeaders }), "Nieuwe rol geven");
+    await check(await fetch(`${memberUrl}/roles/${OUDE_ROL}`, { method: "DELETE", headers: botHeaders }), "Oude rol weghalen");
 
-    const removeRoleResponse = await fetch(
-      `${memberUrl}/roles/${OUDE_ROL}`,
-      { method: "DELETE", headers: botHeaders },
-    );
-    if (!removeRoleResponse.ok) {
-      throw new Error(`Oude rol verwijderen mislukt: ${removeRoleResponse.status}`);
-    }
-
-    return res.send("✅ Je bent geverifieerd! Je kunt Discord weer openen.");
-  } catch (error) {
-    console.error(error);
-    return res.status(500).send("Er ging iets mis.");
+    return res.send(pagina({
+      icoon: "ok",
+      gebruiker: user,
+      titel: "Je bent geverifieerd!",
+      tekst: `Welkom bij ${SERVER_NAAM}. Je hebt nu toegang tot de server.`,
+      knoppen: [{ tekst: "Open Discord", href: `https://discord.com/channels/${GUILD_ID}`, hoofd: true }],
+    }));
+  } catch (err) {
+    console.error(err.message);
+    return res.status(500).send(pagina({
+      icoon: "fout", fout: true,
+      titel: "Er ging iets mis",
+      tekst: "De verificatie is niet gelukt. Probeer het opnieuw, of neem contact op met een admin als het blijft misgaan.",
+      knoppen: opnieuw,
+    }));
   }
 });
 

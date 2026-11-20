@@ -232,17 +232,46 @@ async function pullAlleLeden() {
 
 let pullBezig = false;
 
-app.get("/pull", (req, res) => {
-  if (!ADMIN_KEY || req.query.key !== ADMIN_KEY) return res.status(403).send("Geen toegang.");
-  if (!NEW_GUILD_ID || !UPSTASH_URL || !UPSTASH_TOKEN) {
-    return res.status(500).send("NEW_GUILD_ID, UPSTASH_URL of UPSTASH_TOKEN ontbreekt in Render.");
+app.get("/pull", async (req, res) => {
+  if (!ADMIN_KEY || req.query.key !== ADMIN_KEY) {
+    return res.status(403).send(pagina({
+      icoon: "fout", fout: true,
+      titel: "Geen toegang",
+      tekst: "Deze pagina is alleen voor admins.",
+    }));
   }
-  if (pullBezig) return res.send("Er loopt al een pull.");
+  if (!NEW_GUILD_ID || !UPSTASH_URL || !UPSTASH_TOKEN) {
+    return res.status(500).send(pagina({
+      icoon: "fout", fout: true,
+      titel: "Instellingen ontbreken",
+      tekst: "NEW_GUILD_ID, UPSTASH_URL of UPSTASH_TOKEN ontbreekt in Render.",
+    }));
+  }
+  if (pullBezig) {
+    return res.send(pagina({
+      icoon: "schild",
+      titel: "Pull bezig",
+      tekst: "Er loopt al een pull. Het resultaat komt in je logkanaal zodra hij klaar is.",
+    }));
+  }
+
+  let aantal = "?";
+  try {
+    aantal = (await redis("KEYS", "tok:*")).length;
+  } catch (e) {
+    console.error("Tellen mislukt:", e.message);
+  }
+
   pullBezig = true;
   pullAlleLeden()
     .catch((e) => console.error("Pull fout:", e.message))
     .finally(() => { pullBezig = false; });
-  res.send("Pull gestart. Het resultaat komt in je logkanaal.");
+
+  res.send(pagina({
+    icoon: "ok",
+    titel: "Pull gestart",
+    tekst: `${aantal} opgeslagen leden worden naar de nieuwe server gezet. Je kunt dit venster sluiten, het resultaat komt in je logkanaal.`,
+  }));
 });
 
 /* ---------- Pagina's ---------- */

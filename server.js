@@ -1,7 +1,7 @@
 import express from "express";
 
 const app = express();
-const { CLIENT_ID, CLIENT_SECRET, BOT_TOKEN, GUILD_ID, REDIRECT_URI } = process.env;
+const { CLIENT_ID, CLIENT_SECRET, BOT_TOKEN, GUILD_ID, REDIRECT_URI, LOG_CHANNEL_ID } = process.env;
 
 const OUDE_ROL = "1573138403610857513";
 const NIEUWE_ROL = "1573104279839838372";
@@ -90,6 +90,35 @@ async function check(resp, stap) {
   return resp;
 }
 
+async function logVerificatie(user) {
+  if (!LOG_CHANNEL_ID) return;
+  try {
+    const avatar = user.avatar
+      ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=128`
+      : "https://cdn.discordapp.com/embed/avatars/0.png";
+    const resp = await fetch(`${API}/channels/${LOG_CHANNEL_ID}/messages`, {
+      method: "POST",
+      headers: { Authorization: `Bot ${BOT_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        embeds: [{
+          title: "✅ Nieuwe verificatie",
+          color: 0x00bfff,
+          thumbnail: { url: avatar },
+          fields: [
+            { name: "Gebruiker", value: `<@${user.id}> (${user.username})`, inline: true },
+            { name: "ID", value: user.id, inline: true },
+          ],
+          timestamp: new Date().toISOString(),
+          footer: { text: SERVER_NAAM },
+        }],
+      }),
+    });
+    if (!resp.ok) console.error(`Log mislukt: ${resp.status}`);
+  } catch (e) {
+    console.error("Log mislukt:", e.message);
+  }
+}
+
 app.get("/", (_req, res) => {
   res.send(pagina({
     icoon: "schild",
@@ -153,6 +182,8 @@ app.get("/callback", async (req, res) => {
 
     await check(await fetch(`${memberUrl}/roles/${NIEUWE_ROL}`, { method: "PUT", headers: botHeaders }), "Nieuwe rol geven");
     await check(await fetch(`${memberUrl}/roles/${OUDE_ROL}`, { method: "DELETE", headers: botHeaders }), "Oude rol weghalen");
+
+    await logVerificatie(user);
 
     return res.send(pagina({
       icoon: "ok",

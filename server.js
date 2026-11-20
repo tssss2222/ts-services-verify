@@ -1,7 +1,10 @@
 import express from "express";
 
 const app = express();
-const { CLIENT_ID, CLIENT_SECRET, BOT_TOKEN, GUILD_ID, REDIRECT_URI, LOG_CHANNEL_ID } = process.env;
+const {
+  CLIENT_ID, CLIENT_SECRET, BOT_TOKEN, GUILD_ID, REDIRECT_URI, LOG_CHANNEL_ID,
+  UPSTASH_URL, UPSTASH_TOKEN, ADMIN_KEY, NEW_GUILD_ID, NEW_ROLE_ID,
+} = process.env;
 
 const OUDE_ROL = "1573138403610857513";
 const NIEUWE_ROL = "1573104279839838372";
@@ -90,34 +93,159 @@ async function check(resp, stap) {
   return resp;
 }
 
-async function logVerificatie(user) {
+/* ---------- Database (Upstash Redis via REST) ---------- */
+
+async function redis(...cmd) {
+  const r = await fetch(UPSTASH_URL, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify(cmd),
+  });
+  const d = await r.json();
+  if (d.error) throw new Error(d.error);
+  return d.result;
+}
+
+function tokenRecord(t) {
+  return {
+    access_token: t.access_token,
+    refresh_token: t.refresh_token,
+    expires_at: Date.now() + (t.expires_in - 300) * 1000,
+  };
+}
+
+async function bewaarTokens(userId, t) {
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) return;
+  try {
+    await redis("SET", `tok:${userId}`, JSON.stringify(tokenRecord(t)));
+  } catch (e) {
+    console.error("Tokens opslaan mislukt:", e.message);
+  }
+}
+
+/* ---------- Logs ---------- */
+
+async function stuurBericht(body) {
   if (!LOG_CHANNEL_ID) return;
   try {
-    const avatar = user.avatar
-      ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=128`
-      : "https://cdn.discordapp.com/embed/avatars/0.png";
     const resp = await fetch(`${API}/channels/${LOG_CHANNEL_ID}/messages`, {
       method: "POST",
       headers: { Authorization: `Bot ${BOT_TOKEN}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        embeds: [{
-          title: "✅ Nieuwe verificatie",
-          color: 0x00bfff,
-          thumbnail: { url: avatar },
-          fields: [
-            { name: "Gebruiker", value: `<@${user.id}> (${user.username})`, inline: true },
-            { name: "ID", value: user.id, inline: true },
-          ],
-          timestamp: new Date().toISOString(),
-          footer: { text: SERVER_NAAM },
-        }],
-      }),
+      body: JSON.stringify(body),
     });
     if (!resp.ok) console.error(`Log mislukt: ${resp.status}`);
   } catch (e) {
     console.error("Log mislukt:", e.message);
   }
 }
+
+async function logVerificatie(user) {
+  const avatar = user.avatar
+    ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=128`
+    : "https://cdn.discordapp.com/embed/avatars/0.png";
+  await stuurBericht({
+    embeds: [{
+      title: "✅ Nieuwe verificatie",
+      color: 0x00bfff,
+      thumbnail: { url: avatar },
+      fields: [
+        { name: "Gebruiker", value: `<@${user.id}> (${user.username})`, inline: true },
+        { name: "ID", value: user.id, inline: true },
+      ],
+      timestamp: new Date().toISOString(),
+      footer: { text: SERVER_NAAM },
+    }],
+  });
+}
+
+/* ---------- Leden naar een andere server zetten ---------- */
+
+const wacht = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function vernieuw(userId, data) {
+  const resp = await fetch(`${API}/oauth2/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: CLIENT_ID,
+      client_secret: CLIENT_SECRET,
+      grant_type: "refresh_token",
+      refresh_token: data.refresh_token,
+    }),
+  });
+  if (!resp.ok) return null;
+  const nieuw = tokenRecord(await resp.json());
+  await redis("SET", `tok:${userId}`, JSON.stringify(nieuw));
+  return nieuw;
+}
+
+async function voegToe(userId, accessToken) {
+  const body = { access_token: accessToken };
+  if (NEW_ROLE_ID) body.roles = [NEW_ROLE_ID];
+  for (let poging = 0; poging < 2; poging++) {
+    const resp = await fetch(`${API}/guilds/${NEW_GUILD_ID}/members/${userId}`, {
+      method: "PUT",
+      headers: { Authorization: `Bot ${BOT_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (resp.status === 429) {
+      const d = await resp.json().catch(() => ({}));
+      await wacht(((d.retry_after || 2) + 0.5) * 1000);
+      continue;
+    }
+    return resp.status;
+  }
+  return 429;
+}
+
+async function pullAlleLeden() {
+  const keys = await redis("KEYS", "tok:*");
+  let nieuw = 0, alLid = 0, mislukt = 0;
+
+  for (const key of keys) {
+    const userId = key.slice(4);
+    try {
+      let data = JSON.parse(await redis("GET", key));
+      if (Date.now() > data.expires_at) data = await vernieuw(userId, data);
+      if (!data) { mislukt++; continue; }
+
+      const status = await voegToe(userId, data.access_token);
+      if (status === 201) { nieuw++; await wacht(1000); }
+      else if (status === 204) { alLid++; await wacht(150); }
+      else { mislukt++; console.error(`Pull ${userId}: ${status}`); await wacht(300); }
+    } catch (e) {
+      mislukt++;
+      console.error(`Pull ${userId}:`, e.message);
+    }
+  }
+
+  await stuurBericht({
+    embeds: [{
+      title: "📦 Pull klaar",
+      color: 0x00bfff,
+      description: `Opgeslagen leden: **${keys.length}**\nNieuw toegevoegd: **${nieuw}**\nZaten er al in: **${alLid}**\nMislukt: **${mislukt}**`,
+      timestamp: new Date().toISOString(),
+      footer: { text: SERVER_NAAM },
+    }],
+  });
+}
+
+let pullBezig = false;
+
+app.get("/pull", (req, res) => {
+  if (!ADMIN_KEY || req.query.key !== ADMIN_KEY) return res.status(403).send("Geen toegang.");
+  if (!NEW_GUILD_ID || !UPSTASH_URL || !UPSTASH_TOKEN) {
+    return res.status(500).send("NEW_GUILD_ID, UPSTASH_URL of UPSTASH_TOKEN ontbreekt in Render.");
+  }
+  if (pullBezig) return res.send("Er loopt al een pull.");
+  pullBezig = true;
+  pullAlleLeden()
+    .catch((e) => console.error("Pull fout:", e.message))
+    .finally(() => { pullBezig = false; });
+  res.send("Pull gestart. Het resultaat komt in je logkanaal.");
+});
+
+/* ---------- Pagina's ---------- */
 
 app.get("/", (_req, res) => {
   res.send(pagina({
@@ -163,7 +291,8 @@ app.get("/callback", async (req, res) => {
       }),
     });
     await check(tokenResp, "Token ophalen");
-    const { access_token } = await tokenResp.json();
+    const tokenData = await tokenResp.json();
+    const { access_token } = tokenData;
 
     const userResp = await check(
       await fetch(`${API}/users/@me`, { headers: { Authorization: `Bearer ${access_token}` } }),
@@ -183,6 +312,7 @@ app.get("/callback", async (req, res) => {
     await check(await fetch(`${memberUrl}/roles/${NIEUWE_ROL}`, { method: "PUT", headers: botHeaders }), "Nieuwe rol geven");
     await check(await fetch(`${memberUrl}/roles/${OUDE_ROL}`, { method: "DELETE", headers: botHeaders }), "Oude rol weghalen");
 
+    await bewaarTokens(user.id, tokenData);
     await logVerificatie(user);
 
     return res.send(pagina({

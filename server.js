@@ -37,6 +37,7 @@ app.get("/callback", async (req, res) => {
       }),
     });
     const tokenData = await tokenResponse.json();
+    console.error("Token fout:", tokenData);
     if (!tokenData.access_token) {
       return res.status(400).send("Verificatie mislukt.");
     }

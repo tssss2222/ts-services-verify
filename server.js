@@ -1,5 +1,4 @@
 import express from "express";
-import path from "node:path";
 
 const app = express();
 const {
@@ -236,103 +235,6 @@ async function guildInfo(id) {
   }
 }
 
-/* ---------- Welkomstberichten (na verificatie) ---------- */
-
-const WELKOM_KANAAL_ID = process.env.WELCOME_CHANNEL_ID || "1573473602240512051";
-const TERMS_KANAAL_ID = process.env.TERMS_CHANNEL_ID;     // optioneel
-const REVIEWS_KANAAL_ID = process.env.REVIEWS_CHANNEL_ID; // optioneel
-const BLAUW = 0x00bfff;
-const LIJN = "───────────────────────────";
-
-function gifUrl() {
-  if (process.env.WELCOME_GIF_URL) return process.env.WELCOME_GIF_URL;
-  try { return `${new URL(REDIRECT_URI).origin}/standard_4.gif`; } catch { return null; }
-}
-
-// Aanmaakmoment van een Discord-account (uit het ID), in seconden
-const aangemaakt = (id) => Math.floor(Number((BigInt(id) >> 22n) + 1420070400000n) / 1000);
-
-async function postBericht(kanaalId, body) {
-  try {
-    const resp = await fetch(`${API}/channels/${kanaalId}/messages`, {
-      method: "POST",
-      headers: { Authorization: `Bot ${BOT_TOKEN}`, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!resp.ok) {
-      const f = await leesFout(resp);
-      console.error(`Bericht naar ${kanaalId} mislukt: ${resp.status} (code ${f.code ?? "-"}) ${f.detail}`);
-    }
-    return resp.ok;
-  } catch (e) {
-    console.error("Bericht mislukt:", e.message);
-    return false;
-  }
-}
-
-async function welkomServer(user) {
-  const gif = gifUrl();
-  const info = await guildInfo(GUILD_ID);
-  const leden = info?.approximate_member_count;
-  await postBericht(WELKOM_KANAAL_ID, {
-    embeds: [{
-      title: `🎉 WELCOME TO ${SERVER_NAAM}`,
-      color: BLAUW,
-      description:
-        `<@${user.id}>, welcome to **${SERVER_NAAM}**\n` +
-        `Please check the information channels and **enjoy your stay.**\n\n` +
-        `🆔 **Member:** <@${user.id}> \`${user.username}\`\n` +
-        `✅ **Member Count:** \`${leden != null ? leden.toLocaleString("en-US") : "–"}\`\n` +
-        `🕒 **Account Created:** <t:${aangemaakt(user.id)}:R>`,
-      ...(gif ? { image: { url: gif } } : {}),
-      timestamp: new Date().toISOString(),
-      footer: { text: SERVER_NAAM },
-    }],
-  });
-}
-
-async function welkomPm(user) {
-  const dm = await fetch(`${API}/users/@me/channels`, {
-    method: "POST",
-    headers: { Authorization: `Bot ${BOT_TOKEN}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ recipient_id: user.id }),
-  });
-  if (!dm.ok) {
-    const f = await leesFout(dm);
-    console.error(`Pm openen mislukt voor ${user.id}: ${dm.status} (code ${f.code ?? "-"}) ${f.detail}`);
-    return;
-  }
-  const { id: dmId } = await dm.json();
-
-  const delen = [
-    `Welcome <@${user.id}> to **${SERVER_NAAM}**\nWe warmly welcome you! Below is everything you need to know:`,
-    `${LIJN}\n**You are verified:**\n> • You now have access to the server.`,
-  ];
-  if (TERMS_KANAAL_ID) delen.push(`${LIJN}\n**Check the Terms:**\n> • Read the rules in this channel: <#${TERMS_KANAAL_ID}>`);
-  if (REVIEWS_KANAAL_ID) delen.push(`${LIJN}\n**Check the reviews:**\n> • See what our customers say about our products! <#${REVIEWS_KANAAL_ID}>`);
-  delen.push(LIJN);
-
-  const basis = `https://discord.com/channels/${GUILD_ID}`;
-  const knoppen = [{ type: 2, style: 5, label: "Server", url: basis }];
-  if (TERMS_KANAAL_ID) knoppen.push({ type: 2, style: 5, label: "Terms", url: `${basis}/${TERMS_KANAAL_ID}` });
-  if (REVIEWS_KANAAL_ID) knoppen.push({ type: 2, style: 5, label: "Reviews", url: `${basis}/${REVIEWS_KANAAL_ID}` });
-
-  await postBericht(dmId, {
-    embeds: [{
-      title: `Welcome to ${SERVER_NAAM}`,
-      color: BLAUW,
-      description: delen.join("\n"),
-      footer: { text: `Thanks for joining ${SERVER_NAAM}.` },
-    }],
-    components: [{ type: 1, components: knoppen }],
-  });
-}
-
-async function stuurWelkom(user) {
-  try { await welkomServer(user); } catch (e) { console.error("Welkom server mislukt:", e.message); }
-  try { await welkomPm(user); } catch (e) { console.error("Welkom pm mislukt:", e.message); }
-}
-
 /* ---------- Leden naar een andere server zetten ---------- */
 
 const wacht = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -562,13 +464,6 @@ app.get("/", (_req, res) => {
 
 app.get("/ping", (_req, res) => res.send("ok"));
 
-// De GIF voor het welkomstbericht (standard_4.gif moet in dezelfde map als server.js staan)
-app.get("/standard_4.gif", (_req, res) => {
-  res.sendFile(path.join(process.cwd(), "standard_4.gif"), (err) => {
-    if (err && !res.headersSent) res.status(404).send("niet gevonden");
-  });
-});
-
 // Codes die al zijn ingewisseld (een OAuth-code werkt maar één keer)
 const gebruikteCodes = new Map();
 setInterval(() => {
@@ -647,7 +542,6 @@ app.get("/callback", async (req, res) => {
     await bewaarTokens(user.id, tokenData);
     await logVerificatie(user);
     await registreer(user);
-    await stuurWelkom(user);
 
     return res.send(pagina({
       icoon: "ok",

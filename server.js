@@ -78,6 +78,24 @@ h2{font-size:13px;letter-spacing:.2em;color:var(--accent);margin:26px 0 10px}
 .chips{display:flex;flex-wrap:wrap;gap:8px}
 .chip{padding:6px 10px;border-radius:999px;font-size:12px;border:1px solid rgba(0,191,255,.35)}
 .chip.uit{border-color:#ff4d6d;color:#ff4d6d}
+.zoek{display:flex;gap:8px;margin-bottom:4px}
+.zoek input{flex:1;padding:12px 14px;border-radius:12px;border:1px solid rgba(0,191,255,.35);
+background:rgba(0,191,255,.06);color:#e8f4ff;font-size:14px}
+.zoek input::placeholder{color:#6f8aa3}
+.zoek button{padding:12px 18px;border-radius:12px;border:0;font-weight:700;cursor:pointer;
+background:linear-gradient(135deg,#00bfff,#0077ff);color:#021018}
+.resultaat{padding:14px 16px;border-radius:14px;border:1px solid rgba(0,191,255,.3);background:rgba(0,191,255,.06);margin-bottom:18px}
+.resultaat .rij{border:0;padding:4px 0}
+.resultaat.leeg{border-color:rgba(255,77,109,.4);background:rgba(255,77,109,.08)}
+.verwijder{display:inline-block;margin-top:8px;padding:8px 14px;border-radius:10px;font-size:13px;font-weight:700;
+text-decoration:none;color:#ff4d6d;border:1px solid #ff4d6d}
+.chart{display:flex;align-items:flex-end;gap:5px;height:110px;margin-bottom:18px;padding:10px 4px 0;
+border-bottom:1px solid rgba(255,255,255,.1)}
+.chart .staaf{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%}
+.chart .bar{width:100%;max-width:26px;border-radius:5px 5px 0 0;background:linear-gradient(180deg,#00bfff,#0077ff);
+box-shadow:0 0 10px rgba(0,191,255,.5);min-height:2px}
+.chart .aantal{font-size:11px;color:var(--accent);margin-bottom:3px}
+.chart .dag{font-size:10px;color:#6f8aa3;margin-top:6px}
 `;
 
 function pagina({ icoon = "ok", titel, tekst, gebruiker, knoppen = [], fout = false }) {
@@ -223,6 +241,16 @@ async function registreer(user) {
   }
 }
 
+async function logMislukt(userId, reden, detail) {
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) return;
+  try {
+    await redis("LPUSH", "mislukte_pulls", JSON.stringify({ id: userId, reden, detail: detail || "", tijd: Date.now() }));
+    await redis("LTRIM", "mislukte_pulls", "0", "29");
+  } catch (e) {
+    console.error("Mislukte pull loggen mislukt:", e.message);
+  }
+}
+
 async function guildInfo(id) {
   if (!id) return null;
   try {
@@ -298,6 +326,7 @@ async function pullAlleLeden() {
         // refresh token werkt niet meer (bijv. gebruiker heeft de app ingetrokken)
         tel.ongeldig++;
         await redis("DEL", key);
+        await logMislukt(userId, "Token ongeldig", "Refresh token werkt niet meer");
         continue;
       }
 
@@ -311,16 +340,26 @@ async function pullAlleLeden() {
 
       if (r.status === 201) { tel.nieuw++; await wacht(1000); }
       else if (r.status === 204) { tel.alLid++; await wacht(150); }
-      else if (r.code === 30001) { tel.serverLimiet++; await wacht(300); }
+      else if (r.code === 30001) {
+        tel.serverLimiet++;
+        await logMislukt(userId, "Server-limiet (100)", "");
+        await wacht(300);
+      }
       else if (r.code === 50025) {
         tel.ongeldig++;
         await redis("DEL", key); // token is onbruikbaar, gebruiker moet opnieuw verifiëren
+        await logMislukt(userId, "Token ongeldig", "Opnieuw verifiëren nodig");
         await wacht(300);
       }
-      else { tel.mislukt++; await wacht(300); }
+      else {
+        tel.mislukt++;
+        await logMislukt(userId, `Fout ${r.status}${r.code ? ` (code ${r.code})` : ""}`, r.message || "");
+        await wacht(300);
+      }
     } catch (e) {
       tel.mislukt++;
       console.error(`Pull ${userId}:`, e.message);
+      await logMislukt(userId, "Onverwachte fout", e.message);
     }
   }
 
@@ -385,6 +424,24 @@ app.get("/pull", async (req, res) => {
   }));
 });
 
+/* ---------- Admin: gebruiker verwijderen uit opslag ---------- */
+
+app.get("/admin/verwijder", async (req, res) => {
+  if (!ADMIN_KEY || req.query.key !== ADMIN_KEY) {
+    return res.status(403).send(pagina({
+      icoon: "fout", fout: true,
+      titel: "Geen toegang",
+      tekst: "Deze pagina is alleen voor admins.",
+    }));
+  }
+  const id = (req.query.id || "").replace(/[^0-9]/g, "");
+  const key = encodeURIComponent(req.query.key);
+  if (id && UPSTASH_URL && UPSTASH_TOKEN) {
+    try { await redis("DEL", `tok:${id}`); } catch (e) { console.error("Verwijderen mislukt:", e.message); }
+  }
+  res.redirect(`/admin?key=${key}&zoek=${id}`);
+});
+
 /* ---------- Admin-dashboard ---------- */
 
 app.get("/admin", async (req, res) => {
@@ -396,7 +453,7 @@ app.get("/admin", async (req, res) => {
     }));
   }
 
-  let opgeslagen = "–", vandaag = "–", totaal = "–", recent = [];
+  let opgeslagen = "–", vandaag = "–", totaal = "–", recent = [], mislukteePulls = [], dagen = [];
   if (UPSTASH_URL && UPSTASH_TOKEN) {
     try {
       const dag = new Date().toISOString().slice(0, 10);
@@ -404,8 +461,52 @@ app.get("/admin", async (req, res) => {
       vandaag = (await redis("GET", `stat:dag:${dag}`)) || 0;
       totaal = (await redis("GET", "stat:total")) || 0;
       recent = (await redis("LRANGE", "recent", "0", "9")).map((x) => JSON.parse(x));
+      mislukteePulls = (await redis("LRANGE", "mislukte_pulls", "0", "14")).map((x) => JSON.parse(x));
+
+      // laatste 14 dagen voor de grafiek
+      const datums = Array.from({ length: 14 }, (_, i) => {
+        const d = new Date();
+        d.setUTCDate(d.getUTCDate() - (13 - i));
+        return d.toISOString().slice(0, 10);
+      });
+      const counts = await Promise.all(datums.map((d) => redis("GET", `stat:dag:${d}`)));
+      dagen = datums.map((d, i) => ({
+        label: d.slice(8, 10) + "/" + d.slice(5, 7),
+        aantal: Number(counts[i]) || 0,
+      }));
     } catch (e) {
       console.error("Admin data mislukt:", e.message);
+    }
+  }
+
+  // zoeken op gebruikers-ID
+  let zoekResultaat = null;
+  const zoekId = (req.query.zoek || "").trim().replace(/[^0-9]/g, "");
+  if (zoekId && UPSTASH_URL && UPSTASH_TOKEN) {
+    try {
+      const raw = await redis("GET", `tok:${zoekId}`);
+      let lidHoofd = null, lidNieuw = null;
+      try {
+        const r = await fetch(`${API}/guilds/${GUILD_ID}/members/${zoekId}`, { headers: { Authorization: `Bot ${BOT_TOKEN}` } });
+        if (r.ok) lidHoofd = await r.json();
+      } catch { /* negeren */ }
+      if (NEW_GUILD_ID) {
+        try {
+          const r = await fetch(`${API}/guilds/${NEW_GUILD_ID}/members/${zoekId}`, { headers: { Authorization: `Bot ${BOT_TOKEN}` } });
+          if (r.ok) lidNieuw = await r.json();
+        } catch { /* negeren */ }
+      }
+      zoekResultaat = {
+        id: zoekId,
+        pullbaar: !!raw,
+        verlopen: raw ? Date.now() > JSON.parse(raw).expires_at : null,
+        lidHoofd: !!lidHoofd,
+        naamHoofd: lidHoofd?.user ? (lidHoofd.user.global_name || lidHoofd.user.username) : null,
+        lidNieuw: !!lidNieuw,
+      };
+    } catch (e) {
+      console.error("Zoeken mislukt:", e.message);
+      zoekResultaat = { id: zoekId, fout: true };
     }
   }
 
@@ -427,6 +528,36 @@ app.get("/admin", async (req, res) => {
       )}</small></div>`).join("")
     : `<div class="rij"><small>Nog geen verificaties sinds het dashboard actief is.</small></div>`;
 
+  const maxDag = Math.max(1, ...dagen.map((d) => d.aantal));
+  const chartHtml = dagen.length
+    ? `<div class="chart">${dagen.map((d) => `<div class="staaf">
+        <span class="aantal">${d.aantal || ""}</span>
+        <div class="bar" style="height:${Math.max(2, Math.round((d.aantal / maxDag) * 100))}%"></div>
+        <span class="dag">${d.label}</span></div>`).join("")}</div>`
+    : `<div class="rij"><small>Nog geen gegevens voor een grafiek.</small></div>`;
+
+  const mislukteRijen = mislukteePulls.length
+    ? mislukteePulls.map((m) => `<div class="rij"><span>${esc(m.reden)}${m.detail ? ` <small>· ${esc(m.detail)}</small>` : ""} <small>${esc(m.id)}</small></span><small>${esc(
+        new Date(m.tijd).toLocaleString("nl-NL", { timeZone: "Europe/Amsterdam", dateStyle: "short", timeStyle: "short" })
+      )}</small></div>`).join("")
+    : `<div class="rij"><small>Geen mislukte pulls bekend.</small></div>`;
+
+  let zoekHtml = "";
+  if (zoekResultaat) {
+    if (zoekResultaat.fout) {
+      zoekHtml = `<div class="resultaat leeg">Zoeken is mislukt, controleer de Render-logs.</div>`;
+    } else {
+      const r = zoekResultaat;
+      zoekHtml = `<div class="resultaat${r.pullbaar || r.lidHoofd || r.lidNieuw ? "" : " leeg"}">
+        <div class="rij"><span>Gebruikers-ID</span><small>${esc(r.id)}</small></div>
+        <div class="rij"><span>Lid van hoofdserver</span><small>${r.lidHoofd ? `✅ ${esc(r.naamHoofd || "")}` : "❌"}</small></div>
+        <div class="rij"><span>Lid van nieuwe server</span><small>${r.lidNieuw ? "✅" : "❌"}</small></div>
+        <div class="rij"><span>Opgeslagen token (pullbaar)</span><small>${r.pullbaar ? (r.verlopen ? "✅ (verlopen, wordt vernieuwd)" : "✅") : "❌"}</small></div>
+        ${r.pullbaar ? `<a class="verwijder" href="/admin/verwijder?key=${key}&id=${esc(r.id)}" onclick="return confirm('Opgeslagen token van ${esc(r.id)} verwijderen?')">Verwijder uit opslag</a>` : ""}
+      </div>`;
+    }
+  }
+
   res.send(`<!doctype html><html lang="nl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex">
@@ -442,7 +573,16 @@ ${tegel(vandaag, "Verificaties vandaag")}
 ${tegel(totaal, "Verificaties totaal")}
 ${tegel(Math.floor(process.uptime() / 60) + " min", "Server actief")}
 </div>
+<h2>ZOEK GEBRUIKER (ID)</h2>
+<form class="zoek" method="get" action="/admin">
+  <input type="hidden" name="key" value="${key}">
+  <input type="text" name="zoek" placeholder="Discord gebruikers-ID" value="${esc(zoekId)}" inputmode="numeric">
+  <button type="submit">Zoeken</button>
+</form>
+${zoekHtml}
+<h2>VERIFICATIES PER DAG (14 DAGEN)</h2>${chartHtml}
 <h2>LAATSTE VERIFICATIES</h2>${rijen}
+<h2>MISLUKTE PULLS</h2>${mislukteRijen}
 <h2>INSTELLINGEN</h2><div class="chips">${chips}</div>
 <h2>ACTIES</h2>
 <a class="knop hoofd" href="/pull?key=${key}">Pull starten</a>

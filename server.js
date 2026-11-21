@@ -103,8 +103,39 @@ function pagina({ icoon = "ok", titel, tekst, gebruiker, knoppen = [], fout = fa
 
 const opnieuw = [{ tekst: "Opnieuw proberen", href: authUrl, hoofd: true }];
 
+/* ---------- Foutafhandeling ---------- */
+
+// Fout van de Discord API, met statuscode en Discord-foutcode erbij
+class DiscordFout extends Error {
+  constructor(stap, status, code, fout, detail) {
+    super(
+      `${stap} mislukt: ${status}` +
+      (code ? ` (code ${code})` : "") +
+      (fout ? ` [${fout}]` : "") +
+      (detail ? ` - ${detail}` : "")
+    );
+    this.status = status;
+    this.code = code;   // bijv. 30001 of 50025
+    this.fout = fout;   // bijv. "invalid_grant" bij het token-endpoint
+  }
+}
+
+async function leesFout(resp) {
+  const txt = await resp.text().catch(() => "");
+  let d = {};
+  try { d = JSON.parse(txt); } catch { /* geen JSON */ }
+  return {
+    code: d.code,
+    fout: d.error,
+    detail: d.message || d.error_description || (txt ? txt.slice(0, 200) : ""),
+  };
+}
+
 async function check(resp, stap) {
-  if (!resp.ok) throw new Error(`${stap} mislukt: ${resp.status}`);
+  if (!resp.ok) {
+    const f = await leesFout(resp);
+    throw new DiscordFout(stap, resp.status, f.code, f.fout, f.detail);
+  }
   return resp;
 }
 
@@ -219,16 +250,21 @@ async function vernieuw(userId, data) {
       refresh_token: data.refresh_token,
     }),
   });
-  if (!resp.ok) return null;
+  if (!resp.ok) {
+    const f = await leesFout(resp);
+    console.error(`Token vernieuwen ${userId}: ${resp.status}`, f.fout || "", f.detail || "");
+    return null;
+  }
   const nieuw = tokenRecord(await resp.json());
   await redis("SET", `tok:${userId}`, JSON.stringify(nieuw));
   return nieuw;
 }
 
+// Geeft { status, code, message } terug. 201 = nieuw, 204 = zat er al in.
 async function voegToe(userId, accessToken) {
   const body = { access_token: accessToken };
   if (NEW_ROLE_ID) body.roles = [NEW_ROLE_ID];
-  for (let poging = 0; poging < 2; poging++) {
+  for (let poging = 0; poging < 3; poging++) {
     const resp = await fetch(`${API}/guilds/${NEW_GUILD_ID}/members/${userId}`, {
       method: "PUT",
       headers: { Authorization: `Bot ${BOT_TOKEN}`, "Content-Type": "application/json" },
@@ -239,29 +275,51 @@ async function voegToe(userId, accessToken) {
       await wacht(((d.retry_after || 2) + 0.5) * 1000);
       continue;
     }
-    if (!resp.ok) console.error("Pull antwoord:", resp.status, await resp.text());
-    return resp.status;
+    if (!resp.ok) {
+      const f = await leesFout(resp);
+      console.error(`Pull ${userId}: ${resp.status} (code ${f.code ?? "-"}) ${f.detail}`);
+      return { status: resp.status, code: f.code, message: f.detail };
+    }
+    return { status: resp.status };
   }
-  return 429;
+  return { status: 429, message: "Rate limit" };
 }
 
 async function pullAlleLeden() {
   const keys = await redis("KEYS", "tok:*");
-  let nieuw = 0, alLid = 0, mislukt = 0;
+  const tel = { nieuw: 0, alLid: 0, serverLimiet: 0, ongeldig: 0, mislukt: 0 };
 
   for (const key of keys) {
     const userId = key.slice(4);
     try {
       let data = JSON.parse(await redis("GET", key));
       if (Date.now() > data.expires_at) data = await vernieuw(userId, data);
-      if (!data) { mislukt++; continue; }
+      if (!data) {
+        // refresh token werkt niet meer (bijv. gebruiker heeft de app ingetrokken)
+        tel.ongeldig++;
+        await redis("DEL", key);
+        continue;
+      }
 
-      const status = await voegToe(userId, data.access_token);
-      if (status === 201) { nieuw++; await wacht(1000); }
-      else if (status === 204) { alLid++; await wacht(150); }
-      else { mislukt++; console.error(`Pull ${userId}: ${status}`); await wacht(300); }
+      let r = await voegToe(userId, data.access_token);
+
+      // Ongeldige access token: één keer vernieuwen en opnieuw proberen
+      if (r.code === 50025) {
+        const v = await vernieuw(userId, data);
+        if (v) r = await voegToe(userId, v.access_token);
+      }
+
+      if (r.status === 201) { tel.nieuw++; await wacht(1000); }
+      else if (r.status === 204) { tel.alLid++; await wacht(150); }
+      else if (r.code === 30001) { tel.serverLimiet++; await wacht(300); }
+      else if (r.code === 50025) {
+        tel.ongeldig++;
+        await redis("DEL", key); // token is onbruikbaar, gebruiker moet opnieuw verifiëren
+        await wacht(300);
+      }
+      else { tel.mislukt++; await wacht(300); }
     } catch (e) {
-      mislukt++;
+      tel.mislukt++;
       console.error(`Pull ${userId}:`, e.message);
     }
   }
@@ -270,7 +328,13 @@ async function pullAlleLeden() {
     embeds: [{
       title: "📦 Pull klaar",
       color: 0x00bfff,
-      description: `Opgeslagen leden: **${keys.length}**\nNieuw toegevoegd: **${nieuw}**\nZaten er al in: **${alLid}**\nMislukt: **${mislukt}**`,
+      description:
+        `Opgeslagen leden: **${keys.length}**\n` +
+        `Nieuw toegevoegd: **${tel.nieuw}**\n` +
+        `Zaten er al in: **${tel.alLid}**\n` +
+        `Server-limiet bereikt (100 servers): **${tel.serverLimiet}**\n` +
+        `Token ongeldig (moeten opnieuw verifiëren): **${tel.ongeldig}**\n` +
+        `Overig mislukt: **${tel.mislukt}**`,
       timestamp: new Date().toISOString(),
       footer: { text: SERVER_NAAM },
     }],
@@ -400,6 +464,13 @@ app.get("/", (_req, res) => {
 
 app.get("/ping", (_req, res) => res.send("ok"));
 
+// Codes die al zijn ingewisseld (een OAuth-code werkt maar één keer)
+const gebruikteCodes = new Map();
+setInterval(() => {
+  const grens = Date.now() - 10 * 60 * 1000;
+  for (const [c, t] of gebruikteCodes) if (t < grens) gebruikteCodes.delete(c);
+}, 60 * 1000).unref();
+
 app.get("/callback", async (req, res) => {
   try {
     if (req.query.error) {
@@ -420,6 +491,20 @@ app.get("/callback", async (req, res) => {
         knoppen: opnieuw,
       }));
     }
+
+    // Dubbele aanvraag met dezelfde code (verversen / dubbel klikken)
+    if (gebruikteCodes.has(code)) {
+      return res.send(pagina({
+        icoon: "schild",
+        titel: "Al verwerkt",
+        tekst: "Deze verificatie is al gestart. Open Discord, je zou nu toegang moeten hebben. Lukt het niet, probeer dan opnieuw te verifiëren.",
+        knoppen: [
+          { tekst: "Open Discord", href: `https://discord.com/channels/${GUILD_ID}`, hoofd: true },
+          { tekst: "Opnieuw verifiëren", href: authUrl },
+        ],
+      }));
+    }
+    gebruikteCodes.set(code, Date.now());
 
     const tokenResp = await fetch(`${API}/oauth2/token`, {
       method: "POST",
@@ -467,6 +552,27 @@ app.get("/callback", async (req, res) => {
     }));
   } catch (err) {
     console.error(err.message);
+
+    // Gebruiker zit al in het maximum aantal servers
+    if (err.code === 30001) {
+      return res.status(400).send(pagina({
+        icoon: "fout", fout: true,
+        titel: "Te veel servers",
+        tekst: "Je zit al in het maximum aantal Discord-servers (100, of 200 met Nitro). Verlaat een server en probeer het daarna opnieuw.",
+        knoppen: opnieuw,
+      }));
+    }
+
+    // Code verlopen/al gebruikt, of token ongeldig
+    if (err.fout === "invalid_grant" || err.code === 50025) {
+      return res.status(400).send(pagina({
+        icoon: "fout", fout: true,
+        titel: "Verificatie verlopen",
+        tekst: "De verificatiecode is verlopen of al gebruikt. Klik op de knop om opnieuw te verifiëren.",
+        knoppen: opnieuw,
+      }));
+    }
+
     return res.status(500).send(pagina({
       icoon: "fout", fout: true,
       titel: "Er ging iets mis",

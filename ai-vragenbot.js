@@ -36,10 +36,20 @@ Diensten en prijzen (alle prijzen zijn "vanaf", de echte prijs hangt af van je w
 - Ultimate Server: vanaf €15. 40-60 rollen, 45-70 kanalen, 18-25 categorieën, volledig aangepaste machtigingen, ticketbot, moderatiebot, welkomstbot, verificatiesysteem, beveiligingssysteem, automatische moderatie en extra automatisering.
 - Ook mogelijk: BDFD scripts en commands, ticket- en verificatiesystemen, moderatie en beveiliging.
 
+Hosting van custom bots:
+Bij een custom bot zit 30 dagen hosting via TS SERVICES inbegrepen. De bot wordt dan door TS SERVICES beheerd en hosting verlengen kan. Wil je de bot zelf beheren, dan kan volledige overdracht (broncode en botbestanden) tegen een meerprijs.
+
+Betaalmethodes:
+Voor bestellingen bij TS SERVICES accepteren we Discord Gift, giftcards en Tikkie. Met vragen over betalingen kun je een ticket maken, het team helpt dan verder.
+
+Ticketsoorten (in het ticketkanaal kies je met een knop het juiste ticket):
+- Bestelling: voor het bestellen van een dienst of product.
+- Support: voor vragen, problemen of hulp.
+- Samenwerking: voor partnerships en samenwerkingen.
+- Overig: voor andere vragen of verzoeken.
+
 Verificatie:
 Leden verifiëren zich via de verificatiepagina van TS SERVICES door de bot te autoriseren met hun Discord-account.
-
-Extra informatie (vul hier zelf aan, bijvoorbeeld betaalmethoden, levertijd, regels):
 `;
 // ===================================================
 

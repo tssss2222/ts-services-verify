@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, EmbedBuilder } from "discord.js";
+import { Client, GatewayIntentBits } from "discord.js";
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
@@ -9,7 +9,6 @@ const COOLDOWN_MS = 8_000;          // wachttijd per gebruiker
 const GEHEUGEN_MAX = 8;             // aantal berichten dat de bot onthoudt per gebruiker
 const GEHEUGEN_TIJD = 30 * 60_000;  // vergeet het gesprek na 30 minuten
 const MAX_VRAAG = 1000;             // maximale lengte van een vraag
-const KLEUR = 0x00bfff;
 
 // Kanaal waar je tickets maakt. Pas dit ID aan als het een ander kanaal is.
 const TICKET_KANAAL_ID = "1574174907665883237";
@@ -140,8 +139,8 @@ if (!DISCORD_TOKEN || !GROQ_API_KEY || !CHANNEL_ID) {
     }
   }
 
-  // Splits lange antwoorden netjes op (embed-beschrijving kan max 4096 tekens)
-  function splitTekst(tekst, max = 3800) {
+  // Splits lange antwoorden netjes op (een Discord-bericht kan max 2000 tekens)
+  function splitTekst(tekst, max = 1900) {
     const delen = [];
     let rest = tekst;
     while (rest.length > max) {
@@ -155,12 +154,6 @@ if (!DISCORD_TOKEN || !GROQ_API_KEY || !CHANNEL_ID) {
     return delen;
   }
 
-  const maakEmbed = (tekst, fout = false) =>
-    new EmbedBuilder()
-      .setColor(fout ? 0xff4d6d : KLEUR)
-      .setDescription(tekst)
-      .setFooter({ text: "TS SERVICES · AI-assistent" });
-
   const geenPings = { parse: [], repliedUser: false };
 
   client.once("clientReady", () => console.log(`[vragenbot] Ingelogd als ${client.user.tag}`));
@@ -173,13 +166,13 @@ if (!DISCORD_TOKEN || !GROQ_API_KEY || !CHANNEL_ID) {
     // Gesprek wissen
     if (["!reset", "!nieuw", "!clear"].includes(vraag.toLowerCase())) {
       geheugen.delete(message.author.id);
-      await message.reply({ embeds: [maakEmbed("Gesprek gewist. Stel gerust een nieuwe vraag!")], allowedMentions: geenPings });
+      await message.reply({ content: "Gesprek gewist. Stel gerust een nieuwe vraag!", allowedMentions: geenPings });
       return;
     }
 
     if (vraag.length > MAX_VRAAG) {
       await message.reply({
-        embeds: [maakEmbed(`Je vraag is te lang (max ${MAX_VRAAG} tekens). Maak hem wat korter.`, true)],
+        content: `Je vraag is te lang (max ${MAX_VRAAG} tekens). Maak hem wat korter.`,
         allowedMentions: geenPings,
       });
       return;
@@ -191,7 +184,7 @@ if (!DISCORD_TOKEN || !GROQ_API_KEY || !CHANNEL_ID) {
     const wait = COOLDOWN_MS - (now - (lastUsed.get(message.author.id) || 0));
     if (wait > 0) {
       await message.reply({
-        embeds: [maakEmbed(`Rustig aan, probeer het over ${Math.ceil(wait / 1000)} seconden opnieuw.`, true)],
+        content: `Rustig aan, probeer het over ${Math.ceil(wait / 1000)} seconden opnieuw.`,
         allowedMentions: geenPings,
       });
       return;
@@ -207,7 +200,7 @@ if (!DISCORD_TOKEN || !GROQ_API_KEY || !CHANNEL_ID) {
       const { antwoord, fout } = await askAI(verstuur, message.guild);
 
       if (fout) {
-        await message.reply({ embeds: [maakEmbed(fout, true)], allowedMentions: geenPings });
+        await message.reply({ content: fout, allowedMentions: geenPings });
         return;
       }
 
@@ -217,9 +210,9 @@ if (!DISCORD_TOKEN || !GROQ_API_KEY || !CHANNEL_ID) {
       geheugen.set(message.author.id, g);
 
       const delen = splitTekst(antwoord);
-      await message.reply({ embeds: [maakEmbed(delen[0])], allowedMentions: geenPings });
+      await message.reply({ content: delen[0], allowedMentions: geenPings });
       for (const deel of delen.slice(1)) {
-        await message.channel.send({ embeds: [maakEmbed(deel)], allowedMentions: geenPings });
+        await message.channel.send({ content: deel, allowedMentions: geenPings });
       }
     } catch (err) {
       console.error("[vragenbot]", err);

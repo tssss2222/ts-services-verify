@@ -10,6 +10,9 @@ const GEHEUGEN_MAX = 8;             // aantal berichten dat de bot onthoudt per 
 const GEHEUGEN_TIJD = 30 * 60_000;  // vergeet het gesprek na 30 minuten
 const MAX_VRAAG = 1000;             // maximale lengte van een vraag
 
+// Hoelang de AI aan blijft na !ai aan (in minuten). Aanpassen kan hier of via Render (AI_DUUR_MINUTEN).
+const AI_DUUR_MINUTEN = Number(process.env.AI_DUUR_MINUTEN) || 10;
+
 // Kanaal waar je tickets maakt. Pas dit ID aan als het een ander kanaal is.
 const TICKET_KANAAL_ID = "1574174907665883237";
 
@@ -83,11 +86,19 @@ if (!DISCORD_TOKEN || !GROQ_API_KEY || !CHANNEL_ID) {
   const lastUsed = new Map();   // userId -> tijdstip laatste vraag
   const geheugen = new Map();   // userId -> { berichten: [], tijd }
   const bezig = new Set();      // gebruikers waarvan de vraag nog loopt
+  const sessies = new Map();    // userId -> tijdstip (ms) waarop de AI voor die persoon uitgaat
 
   setInterval(() => {
     const grens = Date.now() - GEHEUGEN_TIJD;
     for (const [id, g] of geheugen) if (g.tijd < grens) geheugen.delete(id);
   }, 10 * 60_000).unref();
+
+  function formatTijd(ms) {
+    const totaal = Math.max(0, Math.ceil(ms / 1000));
+    const min = Math.floor(totaal / 60);
+    const sec = totaal % 60;
+    return `${min}m ${sec}s`;
+  }
 
   function liveInfo(guild) {
     const nu = new Date().toLocaleString("nl-NL", {
@@ -162,11 +173,70 @@ if (!DISCORD_TOKEN || !GROQ_API_KEY || !CHANNEL_ID) {
     if (message.author.bot || message.channel.id !== CHANNEL_ID) return;
     const vraag = message.content.trim();
     if (!vraag) return;
+    const klein = vraag.toLowerCase();
+    const userId = message.author.id;
+
+    // ===== Commando's =====
+
+    // !ai aan
+    if (klein === "!ai aan") {
+      sessies.set(userId, Date.now() + AI_DUUR_MINUTEN * 60_000);
+      await message.reply({
+        content: `✅ De AI staat **aan** voor ${AI_DUUR_MINUTEN} minuten. Stel je vraag! Met \`!time\` zie je hoelang hij nog aan staat.`,
+        allowedMentions: geenPings,
+      });
+      return;
+    }
+
+    // !ai uit
+    if (klein === "!ai uit") {
+      const stond_aan = sessies.delete(userId);
+      geheugen.delete(userId);
+      await message.reply({
+        content: stond_aan ? "🔴 De AI staat nu **uit**." : "De AI stond al uit.",
+        allowedMentions: geenPings,
+      });
+      return;
+    }
+
+    // !time
+    if (klein === "!time") {
+      const eind = sessies.get(userId);
+      if (!eind || eind <= Date.now()) {
+        sessies.delete(userId);
+        await message.reply({
+          content: "De AI staat **uit**. Typ `!ai aan` om hem te starten.",
+          allowedMentions: geenPings,
+        });
+        return;
+      }
+      await message.reply({
+        content: `⏱️ De AI staat nog **${formatTijd(eind - Date.now())}** aan.`,
+        allowedMentions: geenPings,
+      });
+      return;
+    }
 
     // Gesprek wissen
-    if (["!reset", "!nieuw", "!clear"].includes(vraag.toLowerCase())) {
-      geheugen.delete(message.author.id);
+    if (["!reset", "!nieuw", "!clear"].includes(klein)) {
+      geheugen.delete(userId);
       await message.reply({ content: "Gesprek gewist. Stel gerust een nieuwe vraag!", allowedMentions: geenPings });
+      return;
+    }
+
+    // Andere commando's (beginnen met !) negeren
+    if (klein.startsWith("!")) return;
+
+    // ===== Gewone vraag: alleen als de AI aan staat voor deze persoon =====
+    const eind = sessies.get(userId);
+    if (!eind) return; // AI staat uit: negeer het bericht
+    if (eind <= Date.now()) {
+      sessies.delete(userId);
+      geheugen.delete(userId);
+      await message.reply({
+        content: "⌛ De tijd is om, de AI staat nu **uit**. Typ `!ai aan` om opnieuw te starten.",
+        allowedMentions: geenPings,
+      });
       return;
     }
 
@@ -178,10 +248,10 @@ if (!DISCORD_TOKEN || !GROQ_API_KEY || !CHANNEL_ID) {
       return;
     }
 
-    if (bezig.has(message.author.id)) return;
+    if (bezig.has(userId)) return;
 
     const now = Date.now();
-    const wait = COOLDOWN_MS - (now - (lastUsed.get(message.author.id) || 0));
+    const wait = COOLDOWN_MS - (now - (lastUsed.get(userId) || 0));
     if (wait > 0) {
       await message.reply({
         content: `Rustig aan, probeer het over ${Math.ceil(wait / 1000)} seconden opnieuw.`,
@@ -189,13 +259,13 @@ if (!DISCORD_TOKEN || !GROQ_API_KEY || !CHANNEL_ID) {
       });
       return;
     }
-    lastUsed.set(message.author.id, now);
-    bezig.add(message.author.id);
+    lastUsed.set(userId, now);
+    bezig.add(userId);
 
     try {
       await message.channel.sendTyping();
 
-      const g = geheugen.get(message.author.id) || { berichten: [], tijd: now };
+      const g = geheugen.get(userId) || { berichten: [], tijd: now };
       const verstuur = [...g.berichten, { role: "user", content: vraag }];
       const { antwoord, fout } = await askAI(verstuur, message.guild);
 
@@ -207,7 +277,7 @@ if (!DISCORD_TOKEN || !GROQ_API_KEY || !CHANNEL_ID) {
       // Onthoud dit gesprek (alleen als het gelukt is)
       g.berichten = [...verstuur, { role: "assistant", content: antwoord }].slice(-GEHEUGEN_MAX);
       g.tijd = Date.now();
-      geheugen.set(message.author.id, g);
+      geheugen.set(userId, g);
 
       const delen = splitTekst(antwoord);
       await message.reply({ content: delen[0], allowedMentions: geenPings });
@@ -217,7 +287,7 @@ if (!DISCORD_TOKEN || !GROQ_API_KEY || !CHANNEL_ID) {
     } catch (err) {
       console.error("[vragenbot]", err);
     } finally {
-      bezig.delete(message.author.id);
+      bezig.delete(userId);
     }
   });
 
